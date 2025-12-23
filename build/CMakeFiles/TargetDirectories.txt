@@ -1,0 +1,3 @@
+/Users/bhavya_shah/Desktop/T4_bot/build/CMakeFiles/trading_bot.dir
+/Users/bhavya_shah/Desktop/T4_bot/build/CMakeFiles/edit_cache.dir
+/Users/bhavya_shah/Desktop/T4_bot/build/CMakeFiles/rebuild_cache.dir
