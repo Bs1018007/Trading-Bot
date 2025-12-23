@@ -2,6 +2,8 @@
 build/
 bin/
 lib/
+third_party/
+
 
 # Generated Code
 generated/
