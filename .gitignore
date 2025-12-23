@@ -1,4 +1,16 @@
-.third_party
-.build
+# Build directories
+build/
+bin/
+lib/
+
+# Generated Code
+generated/
+
+# OS Junk
+.DS_Store
+.vscode/
+.idea/
+
+# Logs
+logs/
 *.log
-.generted
