@@ -23,6 +23,7 @@ public:
     size_t get_count() const;
 
 private:
+
     std::vector<std::string> symbols_;
     std::unordered_map<std::string, bool> subscribed_;
     mutable std::mutex mutex_;

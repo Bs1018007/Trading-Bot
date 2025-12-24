@@ -98,12 +98,16 @@ std::vector<std::string> BybitRestClient::fetch_all_usdt_symbols() {
                     sym.find("10") == std::string::npos) {
                     symbols.push_back(std::string(sym));
                     count++;
+
+                    
                     if (count % 10 == 0) {
                         std::cout << "  ✓ Loaded " << count << " symbols...\n";
                     }
                 }
             }
         }
+        
+        //getsubscriptionMessage
         
         std::cout << "\n✓ Successfully fetched " << symbols.size() << " USDT trading pairs from Bybit\n\n";
     } catch (const simdjson::simdjson_error& e) {

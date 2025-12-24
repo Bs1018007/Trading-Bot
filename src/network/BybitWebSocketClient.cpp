@@ -33,7 +33,7 @@ BybitWebSocketClient::BybitWebSocketClient(
     if (config_.enable_aeron) {
         aeron_pub_ = std::make_unique<AeronPublisher>(
             config_.aeron_channel, config_.orderbook_stream_id);
-        
+        // ** Initialize Aeron Publisher **
         if (!aeron_pub_->init()) {
             std::cerr << "⚠ Aeron disabled - continuing without IPC\n";
             aeron_pub_.reset();
