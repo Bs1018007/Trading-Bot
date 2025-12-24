@@ -29,6 +29,13 @@ BybitWebSocketClient::BybitWebSocketClient(
     if (!context_) {
         throw std::runtime_error("Failed to create WebSocket context");
     }
+    std::cout << "⚡ Pre-building subscription messages...\n";
+    auto start = std::chrono::high_resolution_clock::now();
+    prepare_subscription_messages();
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    std::cout << "✓ Subscription messages prepared in " << duration << " μs\n";
+    std::cout << "✓ Total batches: " << subscription_messages_.size() << "\n\n";
     
     if (config_.enable_aeron) {
         aeron_pub_ = std::make_unique<AeronPublisher>(
@@ -45,6 +52,50 @@ BybitWebSocketClient::~BybitWebSocketClient() {
     running_ = false;
     if (context_) {
         lws_context_destroy(context_);
+    }
+}
+void BybitWebSocketClient::prepare_subscription_messages() {
+    auto symbols = symbol_manager_.get_symbols();
+    
+    const int MAX_SYMBOLS_PER_BATCH = 200;  // Bybit limit
+    
+    subscription_messages_.clear();
+    subscription_messages_.reserve((symbols.size() / MAX_SYMBOLS_PER_BATCH) + 1);
+    
+    std::string current_batch = "{\"op\":\"subscribe\",\"args\":[";
+    int count_in_batch = 0;
+    
+    for (size_t i = 0; i < symbols.size(); ++i) {
+        // Add symbol to current batch
+        current_batch += "\"orderbook.50." + symbols[i] + "\"";
+        count_in_batch++;
+        
+        // Check if this is the last symbol or batch is full
+        bool is_last_symbol = (i == symbols.size() - 1);
+        bool batch_full = (count_in_batch >= MAX_SYMBOLS_PER_BATCH);
+        
+        if (is_last_symbol || batch_full) {
+            // Close this batch
+            current_batch += "]}";
+            subscription_messages_.push_back(std::move(current_batch));
+            
+            std::cout << "  ✓ Prepared batch " << subscription_messages_.size() 
+                     << " with " << count_in_batch << " symbols\n";
+            
+            // Start new batch if not done
+            if (!is_last_symbol) {
+                current_batch = "{\"op\":\"subscribe\",\"args\":[";
+                count_in_batch = 0;
+            }
+        } else {
+            // Add comma for next symbol
+            current_batch += ",";
+        }
+    }
+    
+    // Mark all symbols as prepared for subscription
+    for (const auto& sym : symbols) {
+        symbol_manager_.mark_subscribed(sym);
     }
 }
 
@@ -93,8 +144,45 @@ int BybitWebSocketClient::callback_function(
     }
     return 0;
 }
-
 void BybitWebSocketClient::subscribe_orderbooks() {
+    std::cout << "\n🚀 Sending " << subscription_messages_.size() 
+             << " subscription batches...\n";
+    
+    auto start = std::chrono::high_resolution_clock::now();
+    
+    for (size_t i = 0; i < subscription_messages_.size(); ++i) {
+        const std::string& sub_msg = subscription_messages_[i];
+        
+        // Allocate buffer with LWS_PRE padding
+        unsigned char buf[LWS_PRE + 8192];
+        
+        // Copy message after padding
+        memcpy(&buf[LWS_PRE], sub_msg.c_str(), sub_msg.length());
+        
+        // Send to WebSocket
+        int written = lws_write(wsi_, &buf[LWS_PRE], sub_msg.length(), LWS_WRITE_TEXT);
+        
+        if (written < 0) {
+            std::cerr << "✗ Failed to send batch " << (i + 1) << "\n";
+        } else {
+            std::cout << "  ✓ Sent batch " << (i + 1) << "/" << subscription_messages_.size() 
+                     << " (" << written << " bytes)\n";
+        }
+        
+        // Small delay between batches to avoid overwhelming the server
+        if (i < subscription_messages_.size() - 1) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+        }
+    }
+    
+    auto end = std::chrono::high_resolution_clock::now();
+    auto duration = std::chrono::duration_cast<std::chrono::microseconds>(end - start).count();
+    
+    std::cout << "\n✅ All subscriptions sent in " << duration << " μs\n";
+    std::cout << "⚡ Average per batch: " << (duration / subscription_messages_.size()) << " μs\n\n";
+}
+
+/*void BybitWebSocketClient::subscribe_orderbooks() {
     auto symbols = symbol_manager_.get_symbols();
     
     const int MAX_SYMBOLS_PER_CONNECTION = 200;
@@ -138,7 +226,7 @@ void BybitWebSocketClient::subscribe_orderbooks() {
     for (const auto& sym : symbols) {
         symbol_manager_.mark_subscribed(sym);
     }
-}
+}*/
 
 void BybitWebSocketClient::handle_message(char* data, size_t len) {
     try {

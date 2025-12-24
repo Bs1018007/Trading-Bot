@@ -40,6 +40,7 @@ private:
     std::atomic<bool> running_{true};
     std::atomic<uint64_t> messages_received_{0};
     std::atomic<uint64_t> aeron_published_{0};
+    std::vector<std::string> subscription_messages_;
     
     static int callback_function(
         struct lws* wsi,
@@ -51,6 +52,7 @@ private:
     
     void subscribe_orderbooks();
     void handle_message(char* data, size_t len);
+    void prepare_subscription_messages();
     
     static struct lws_protocols protocols_[];
 };
