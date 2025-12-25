@@ -37,7 +37,7 @@ bool OrderBook::get_best_ask(double& price, double& qty) const {
     return false;
 }
 
-double OrderBook::get_mid_price() const {
+double OrderBook::get_fair_price() const {
     double bid_price, ask_price, bid_qty, ask_qty;
     if (get_best_bid(bid_price, bid_qty) && get_best_ask(ask_price, ask_qty)) {
         return (bid_price + ask_price) / 2.0;

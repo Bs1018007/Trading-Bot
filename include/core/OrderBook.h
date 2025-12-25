@@ -17,7 +17,7 @@ public:
     
     bool get_best_bid(double& price, double& qty) const;
     bool get_best_ask(double& price, double& qty) const;
-    double get_mid_price() const;
+    double get_fair_price() const;
     
     std::vector<std::pair<double, double>> get_bids(int max_levels = 10) const;
     std::vector<std::pair<double, double>> get_asks(int max_levels = 10) const;

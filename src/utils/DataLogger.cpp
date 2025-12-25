@@ -58,7 +58,7 @@ void DataLogger::log_orderbook(
     if (!log_file.is_open()) return;
     
     log_file << "[" << get_timestamp() << "] "
-              << symbol << " | Mid: $" << std::fixed 
+              << symbol << " | Fair Pice: $" << std::fixed 
               << std::setprecision(2) << mid_price << "\n";
     
     // Log top 5 bids
