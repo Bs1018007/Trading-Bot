@@ -35,6 +35,8 @@ At runtime, the system:
 # Make the build script executable (one-time)
 chmod +x build.sh
 
+---
+
 # Build the entire project
 ./build.sh
 
@@ -43,10 +45,10 @@ The build script automatically installs all dependencies, builds **simdjson**, *
 
 ---
 
-## ▶️ Running the Application
+# ▶️ Running the Application
 
-cd build
-./trading_bot
+ - cd build
+ - ./trading_bot
 
 
 ---
