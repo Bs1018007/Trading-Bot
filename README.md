@@ -1,4 +1,4 @@
-<h1 align="center">🚀 Ultra-Low Latency Trading Bot</h1>
+<h1 align="center"> Ultra-Low Latency Trading Bot</h1>
 
 <p align="center">
   <b>C++ · WebSocket · simdjson · SBE · Aeron IPC</b>
@@ -6,7 +6,7 @@
 
 ---
 
-## 📌 Overview
+##  Overview
 
 This project implements a **high-performance C++ market data system** that streams live **Bybit USDT perpetual futures order books**, parses them using **SIMD-accelerated JSON**, maintains **in-memory order books**, and publishes **compact binary market data** over **Aeron IPC** for ultra-low-latency downstream consumption.
 
@@ -14,7 +14,7 @@ The system is designed to **mimic real HFT market-data gateways**, focusing on *
 
 ---
 
-## ⚙️ What This Project Does
+##  What This Project Does
 
 At runtime, the system:
 
@@ -30,7 +30,7 @@ At runtime, the system:
 
 ---
 
-## 🛠 Installation & Build
+##  Installation & Build
 
 # Make the build script executable (one-time)
 chmod +x build.sh
@@ -45,7 +45,7 @@ The build script automatically installs all dependencies, builds **simdjson**, *
 
 ---
 
-# ▶️ Running the Application
+#  Running the Application
 
  - cd build
  - ./trading_bot
@@ -53,7 +53,7 @@ The build script automatically installs all dependencies, builds **simdjson**, *
 
 ---
 
-## ⚡ Key Features
+##  Key Features
 
 1. Live Bybit order book streaming for all USDT perpetual pairs
 2. SIMD-accelerated JSON parsing

@@ -14,6 +14,7 @@ public:
     bool is_connected() const;
     uint64_t get_messages_sent() const;
 
+    
 private:
     std::shared_ptr<aeron::Aeron> aeron_;
     std::shared_ptr<aeron::Publication> publication_;
