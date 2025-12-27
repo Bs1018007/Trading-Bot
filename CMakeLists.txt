@@ -140,6 +140,7 @@ set(SOURCES
     # Utils
     src/utils/DataLogger.cpp
     src/utils/PerformanceMonitor.cpp
+    src/trading/TradingEngine.cpp
 )
 
 # ============================================================================
@@ -185,6 +186,13 @@ if(APPLE)
         "/opt/homebrew/opt/curl/lib"
         "/usr/local/opt/libwebsockets/lib"
         "/usr/local/opt/curl/lib"
+        ${AERON_LIB_DIR}
+    )
+    # Set rpath so Aeron libraries can be found at runtime
+    set_target_properties(trading_bot PROPERTIES
+        BUILD_RPATH "${AERON_LIB_DIR}"
+        INSTALL_RPATH "${AERON_LIB_DIR}"
+        BUILD_WITH_INSTALL_RPATH TRUE
     )
 endif()
 

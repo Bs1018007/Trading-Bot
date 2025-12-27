@@ -2,77 +2,95 @@
 #include "utils/DataLogger.h"
 #include "core/OrderBookManager.h"
 #include "core/SymbolManager.h"
-#include "network/BybitRestClient.h"
+// #include "network/BybitRestClient.h"
 #include "network/BybitWebSocketClient.h"
-#include "utils/PerformanceMonitor.h"
+// #include "utils/PerformanceMonitor.h"
+#include "trading/TradingEngine.h"
+#include "messaging/AeronPublisher.h"
 #include <iostream>
 #include <thread>
 #include <chrono>
 
 int main() {
+    std::string TRADING_SYMBOL = "BTCUSDT";
+    
     BotConfiguration config;
-    config.trade_quantity = 0.001;
-    config.max_orders_per_second = 10000;
-    config.enable_trading = false;
+    config.enable_trading = true;
     config.enable_aeron = true;
     
-    std::cout << "\n========================================\n";
-    std::cout << "BYBIT MULTI-CRYPTO TRADING BOT\n";
-    std::cout << "Aeron + SBE + WebSocket\n";
-    std::cout << "========================================\n\n";
-    
-    std::cout << "🔄 Fetching ALL cryptocurrencies from Bybit...\n";
-    auto all_symbols = BybitRestClient::fetch_all_usdt_symbols();
-    
-    if (all_symbols.empty()) {
-        std::cerr << "❌ Failed to fetch symbols, using defaults\n";
-        config.symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
-    } else {
-        config.symbols = all_symbols;
-        std::cout << "✓ Successfully fetched " << all_symbols.size() << " cryptocurrencies!\n";
-    }
-    
-    std::cout << "Tracking " << config.symbols.size() << " symbols\n";
-    std::cout << "Trade quantity: " << config.trade_quantity << "\n";
-    std::cout << "Max orders/sec: " << config.max_orders_per_second << "\n";
-    std::cout << "Trading mode: " << (config.enable_trading ? "LIVE" : "DRY RUN") << "\n";
-    std::cout << "Aeron IPC: " << (config.enable_aeron ? "ENABLED" : "DISABLED") << "\n\n";
-    
     try {
-        DataLogger data_logger("bybit_trading.log");
+        DataLogger data_logger("trading.log");
         OrderBookManager orderbook_manager;
-        SymbolManager symbol_manager(config.symbols);
-        
-        data_logger.log_symbol_subscription(config.symbols);
+        SymbolManager symbol_manager;
         
         BybitWebSocketClient ws_client(orderbook_manager, symbol_manager, config, data_logger);
-        PerformanceMonitor monitor(ws_client, orderbook_manager, data_logger);
-        
         ws_client.connect();
         
         std::thread ws_thread([&]() { ws_client.run(); });
-        std::thread monitor_thread([&]() { monitor.run(); });
         
-        std::cout << "✓ All systems running. Press Ctrl+C to stop.\n\n";
+        // Wait for WebSocket connection to establish
+        std::cout << "⏳ Waiting for WebSocket connection...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(3));
         
-        std::this_thread::sleep_for(std::chrono::hours(24));
+        // Subscribe to symbol
+        std::cout << "\n📡 Subscribing to " << TRADING_SYMBOL << "...\n";
+        ws_client.subscribe_to_symbol(TRADING_SYMBOL);
         
-        std::cout << "\nShutting down...\n";
-        ws_client.stop();
-        monitor.stop();
+        // Wait for subscription confirmation and first orderbook update
+        std::cout << "⏳ Waiting for orderbook data...\n";
+        std::this_thread::sleep_for(std::chrono::seconds(3));
+        
+        // Verify subscription status
+        if (symbol_manager.is_subscribed(TRADING_SYMBOL)) {
+            std::cout << "✅ " << TRADING_SYMBOL << " is subscribed!\n";
+            auto orderbook = orderbook_manager.get(TRADING_SYMBOL);
+            if (orderbook) {
+                std::cout << "   Orderbook exists with " << orderbook->get_update_count() << " updates\n";
+            }
+        } else {
+            std::cerr << "❌ Subscription failed for " << TRADING_SYMBOL << "\n";
+        }
+        std::cout << "\n";
+        
+        // ✨ NEW: Create Aeron publisher for order buffer
+        auto aeron_publisher = std::make_shared<AeronPublisher>(
+            config.aeron_channel,
+            config.orderbook_stream_id
+        );
+        
+        if (!aeron_publisher->init()) {
+            std::cerr << "⚠ Aeron failed to init, continuing without buffer\n";
+            aeron_publisher = nullptr;
+        }
+        
+        // Create trading engine with Aeron publisher
+        TradingEngine trading_engine(
+            TRADING_SYMBOL,
+            orderbook_manager,
+            symbol_manager,
+            data_logger,
+            ws_client.get_wsi(),
+            aeron_publisher  // ← Pass the Aeron publisher
+        );
+        
+        std::cout << "✅ Starting trading loop with Aeron buffer\n\n";
+        
+        while (true) {
+            trading_engine.run_trading_cycle();
+            
+            // Print buffer stats
+            if (aeron_publisher) {
+                auto all_orders = aeron_publisher->get_all_orders();
+                std::cout << "📊 Orders in Aeron buffer: " << all_orders.size() << "\n";
+            }
+            
+            std::this_thread::sleep_for(std::chrono::seconds(5));
+        }
         
         ws_thread.join();
-        monitor_thread.join();
-        
-        std::cout << "\n========== FINAL STATISTICS ==========\n";
-        std::cout << "WebSocket messages: " << ws_client.get_message_count() << "\n";
-        std::cout << "Aeron published: " << ws_client.get_aeron_count() << "\n";
-        std::cout << "Total symbols tracked: " << orderbook_manager.size() << "\n";
-        std::cout << "======================================\n";
-        std::cout << "\n✓ Bot stopped cleanly\n\n";
         
     } catch (const std::exception& e) {
-        std::cerr << "✗ Fatal error: " << e.what() << std::endl;
+        std::cerr << "✗ Error: " << e.what() << std::endl;
         return 1;
     }
     

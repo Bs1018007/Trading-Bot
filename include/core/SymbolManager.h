@@ -1,30 +1,26 @@
 #pragma once
 #include <vector>
 #include <string>
-#include <unordered_map>
+#include <unordered_set>
 #include <mutex>
 
 class SymbolManager {
 public:
-    explicit SymbolManager(const std::vector<std::string>& initial_symbols);
+    SymbolManager() = default;
     
-    // Delete copy operations
-    SymbolManager(const SymbolManager&) = delete;
-    SymbolManager& operator=(const SymbolManager&) = delete;
+    // Add symbol if not already tracked
+    bool add_symbol(const std::string& symbol);
     
-    // Allow move operations
-    SymbolManager(SymbolManager&&) noexcept = default;
-    SymbolManager& operator=(SymbolManager&&) noexcept = default;
+    // Check if symbol is subscribed
+    bool is_subscribed(const std::string& symbol) const;
     
-    void add_symbol(const std::string& symbol);
-    void mark_subscribed(const std::string& symbol);
-    std::vector<std::string> get_symbols() const;
-    std::vector<std::string> get_unsubscribed() const;
+    // Get all subscribed symbols
+    std::vector<std::string> get_all_symbols() const;
+    
+    // Get count
     size_t get_count() const;
 
 private:
-
-    std::vector<std::string> symbols_;
-    std::unordered_map<std::string, bool> subscribed_;
+    std::unordered_set<std::string> subscribed_symbols_;
     mutable std::mutex mutex_;
 };

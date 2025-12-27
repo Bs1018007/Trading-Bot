@@ -1,45 +1,32 @@
 #include "core/SymbolManager.h"
 #include <iostream>
 
-SymbolManager::SymbolManager(const std::vector<std::string>& initial_symbols)
-    : symbols_(initial_symbols) {
-    for (const auto& sym : symbols_) {
-        subscribed_[sym] = false;
+bool SymbolManager::add_symbol(const std::string& symbol) {
+    std::lock_guard<std::mutex> lock(mutex_);
+    
+    auto result = subscribed_symbols_.insert(symbol);
+    
+    if (result.second) {  // New symbol added
+        std::cout << "✓ Added new symbol: " << symbol 
+                  << " (total: " << subscribed_symbols_.size() << ")\n";
+        return true;
     }
+    
+    return false;  // Already exists
 }
 
-void SymbolManager::add_symbol(const std::string& symbol) {
+bool SymbolManager::is_subscribed(const std::string& symbol) const {
     std::lock_guard<std::mutex> lock(mutex_);
-    if (subscribed_.find(symbol) == subscribed_.end()) {
-        symbols_.push_back(symbol);
-        subscribed_[symbol] = false;
-        std::cout << "✓ Added symbol: " << symbol << "\n";
-    }
+    return subscribed_symbols_.find(symbol) != subscribed_symbols_.end();
 }
 
-void SymbolManager::mark_subscribed(const std::string& symbol) {
+std::vector<std::string>SymbolManager::get_all_symbols() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    subscribed_[symbol] = true;
+    return std::vector<std::string>(subscribed_symbols_.begin(), subscribed_symbols_.end());
 }
 
-std::vector<std::string> SymbolManager::get_symbols() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    return symbols_;
-}
-
-std::vector<std::string> SymbolManager::get_unsubscribed() const {
-    std::lock_guard<std::mutex> lock(mutex_);
-    std::vector<std::string> unsubscribed;
-    for (const auto& sym : symbols_) {
-        auto it = subscribed_.find(sym);
-        if (it != subscribed_.end() && !it->second) {
-            unsubscribed.push_back(sym);
-        }
-    }
-    return unsubscribed;
-}
 
 size_t SymbolManager::get_count() const {
     std::lock_guard<std::mutex> lock(mutex_);
-    return symbols_.size();
+    return subscribed_symbols_.size();
 }

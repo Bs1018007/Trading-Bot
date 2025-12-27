@@ -10,7 +10,7 @@ struct PriceLevel {
 
 class OrderBook {
 public:
-    static constexpr int MAX_LEVELS = 50;
+    static constexpr int MAX_LEVELS = 10;
     
     void update_bids(const std::vector<PriceLevel>& bids);
     void update_asks(const std::vector<PriceLevel>& asks);
