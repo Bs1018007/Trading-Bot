@@ -1,25 +1,26 @@
 #pragma once
+
+#include <string>
+#include <atomic>
+#include <memory>
+#include <chrono>
+#include <mutex>
+
 #include "core/OrderBookManager.h"
 #include "core/SymbolManager.h"
-#include "messaging/SBEEncoder.h"
-#include "messaging/AeronPublisher.h"
 #include "utils/DataLogger.h"
-#include <libwebsockets.h>
-#include <string>
-#include <memory>
-#include <atomic>
-#include <unordered_map>
+#include "messaging/AeronPublisher.h"
+#include "messaging/SBEEncoder.h"       // [NEW] Required for SBE
+#include "network/BybitWebSocketClient.h" 
 
-struct ActiveOrder {
-    std::string order_id;
-    std::string symbol;
-    std::string side;        // "Buy" or "Sell"
-    double entry_price;
-    double quantity;
-    double profit_target;
-    double stop_loss_price;  // New: Track SL
-    bool has_profit_order;
-    uint64_t timestamp;
+// [HFT STATE MACHINE]
+enum class BotState {
+    IDLE,
+    PLACING_ORDER,
+    WORKING,
+    IN_POSITION,
+    CANCELLING,
+    RECOVERING
 };
 
 class TradingEngine {
@@ -29,77 +30,98 @@ public:
         OrderBookManager& obm,
         SymbolManager& sm,
         DataLogger& logger,
-        struct lws* wsi,
+        BybitWebSocketClient* trade_client,
         std::shared_ptr<AeronPublisher> aeron_pub
     );
-    
-    // Main trading loop - executes all steps including recovery logic
+
+    // Main Loop
     void run_trading_cycle();
-    
-    // Get current state
-    bool has_active_order() const { return has_entry_order_ || has_profit_order_; }
-    const ActiveOrder* get_active_order() const;
+
+    // Async Callback
+    void on_order_update(const std::string& order_id, const std::string& status);
 
 private:
+    // ========================================================================
+    // DEPENDENCIES
+    // ========================================================================
     std::string symbol_;
     OrderBookManager& orderbook_manager_;
     SymbolManager& symbol_manager_;
     DataLogger& logger_;
-    struct lws* wsi_;
+    BybitWebSocketClient* trade_client_;
     std::shared_ptr<AeronPublisher> aeron_publisher_;
+    
+    // [NEW] SBE Encoder for compact binary messaging
     SBEEncoder sbe_encoder_;
+
+    // ========================================================================
+    // STATE MANAGEMENT
+    // ========================================================================
+    std::atomic<BotState> current_state_{BotState::IDLE};
+    std::string active_order_id_;
     
-    // Order tracking
-    ActiveOrder current_order_;
-    bool has_entry_order_;
-    bool has_profit_order_;
+    // [NEW] Track the price of our active order for Chase Logic
+    double active_order_price_ = 0.0; 
+
+    std::chrono::steady_clock::time_point state_entry_time_;
+    std::chrono::steady_clock::time_point position_entry_time_;
+    std::chrono::steady_clock::time_point last_status_log_;
+
+    // ========================================================================
+    // MARTINGALE STRATEGY PARAMETERS
+    // ========================================================================
+    double base_quantity_;
+    double current_qty_;
+    int martingale_step_;
+    int max_martingale_steps_;
+    double profit_target_percent_;
+    double stop_loss_percent_;
+    double cumulative_loss_;
     
-    // ---------------------------------------------------------
-    // STRATEGY CONFIGURATION & STATE
-    // ---------------------------------------------------------
-    static constexpr double ENTRY_OFFSET_BPS = 0.0001; // 0.01%
-    static constexpr double PROFIT_PERCENT   = 0.0005; // 0.05%
-    static constexpr double STOP_LOSS_PERCENT= 0.0020; // 0.20%
-    static constexpr double FEE_BUFFER       = 0.0006; // 0.06% (Est. Taker+Maker fees)
-    static constexpr double BASE_QUANTITY    = 0.001;  // Starting Size
-    static constexpr int    MAX_RECOVERY_STEPS = 5;    // Max Doubling
+    // ========================================================================
+    // POSITION STATE
+    // ========================================================================
+    bool is_short_;
+    double entry_price_;
+    bool position_filled_;
+    bool waiting_for_close_;
     
-    // Dynamic State
-    double current_quantity_;   // Changes based on Martingale
-    int recovery_step_;         // How many times have we doubled?
-    bool is_short_strategy_;    // True = Short/Sell, False = Long/Buy
+    // ========================================================================
+    // PNL & STATISTICS
+    // ========================================================================
+    double last_pnl_percent_;
+    double last_pnl_dollars_;
+    int total_trades_ = 0;
+    int winning_trades_ = 0;
+    double total_profit_ = 0.0;
+
+    const int64_t ORDER_TIMEOUT_MS = 5000;
+
+    // ========================================================================
+    // INTERNAL FUNCTIONS
+    // ========================================================================
     
-    // ---------------------------------------------------------
-    // STEP IMPLEMENTATIONS
-    // ---------------------------------------------------------
-    bool step1_check_subscription();
-    bool step2_parse_orderbook(double& top_bid, double& top_ask);
-    void step3_limit_depth_to_10();
+    bool validate_market_data();
+    void reconcile_state_on_startup();
     
-    void step4_send_to_sbe(double top_bid, double top_ask);
+    // Strategy Logic
+    void evaluate_entry_signal();
+    void manage_open_position();
+    void apply_martingale_recovery();
+    void monitor_working_order(); // [NEW] Chase Logic
     
-    // Updated to support Shorting
-    double step5_calculate_entry_price(double top_bid, double top_ask, bool go_short);
+    // Position Helpers
+    void close_position_with_profit();
+    void close_position_with_loss();
+    void close_position_and_reset();
+    void close_position();
     
-    bool step6_check_existing_order();
-    void step7_cancel_existing_order();
+    // Execution
+    void place_order(double price, bool is_short);
+    void handle_timeout();
     
-    // Updated to support dynamic quantity
-    void step8_place_limit_order(bool go_short, double price, double quantity);
-    
-    // Updated for SL and TP
-    void step9_calculate_risk_levels(double entry_price, bool go_short);
-    
-    // Updated to return outcome: 0=Waiting, 1=Win, -1=Loss
-    int step10_monitor_trade_outcome();
-    
-    void step11_close_position(double price, bool is_profit);
-    
-    // New: Handle Doubling/Martingale logic
-    void step12_handle_recovery_logic(int outcome);
-    
-    // Helper functions
-    void send_websocket_message(const std::string& message);
-    std::string generate_order_id();
-    void save_to_aeron_buffer(const ActiveOrder& order);
+    // Utils
+    std::string generate_id();
+    void print_statistics();
+    void log_status();
 };

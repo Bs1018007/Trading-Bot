@@ -7,14 +7,17 @@
 #include <unordered_map>
 #include <mutex>
 
-// Order stored in Aeron buffer
+// [CRITICAL FIX]
+// This struct must use 'char[]' arrays, NOT 'std::string'.
+// 1. Strings cannot be copied with strncpy (causing your error).
+// 2. Strings crash Shared Memory (Aeron) because they contain pointers.
 struct AeronOrderRecord {
-    std::string order_id;
-    std::string symbol;
+    char order_id[64];  // Fixed buffer for ID
+    char symbol[16];    // Fixed buffer for "BTCUSDT"
+    char side[8];       // Fixed buffer for "Buy"/"Sell"
     double price;
     double quantity;
-    std::string side;
-    uint64_t timestamp;
+    int64_t timestamp;
     bool is_active;
 };
 

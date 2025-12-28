@@ -9,6 +9,9 @@
 AeronPublisher::AeronPublisher(const std::string& channel, int32_t stream_id)
     : channel_(channel), stream_id_(stream_id) {}
 
+// Starts the Aeron messaging system.
+// Connects to the media driver and establishes a publication channel (stream_id).
+// Returns true if the radio is on and transmitting.
 bool AeronPublisher::init() {
     try {
         if (!GlobalMediaDriver::get_instance().initialize()) {
@@ -58,7 +61,11 @@ bool AeronPublisher::init() {
 }
 
 // ============================================================================
-// ✨ NEW: Publish order and save to buffer
+// FUNCTION: publish_order
+// PURPOSE:  The "Save & Send" function.
+//           1. Converts the Order object into a text string.
+//           2. Broadcasts it via Aeron to any listeners (Loggers/UI).
+//           3. IMPORTANT: Saves a copy in local RAM so the bot remembers it.
 // ============================================================================
 bool AeronPublisher::publish_order(const AeronOrderRecord& order) {
     std::cout << "📤 Publishing order to Aeron buffer: " << order.order_id << "\n";
@@ -81,14 +88,20 @@ bool AeronPublisher::publish_order(const AeronOrderRecord& order) {
 }
 
 // ============================================================================
-// ✨ NEW: Publish orderbook data
+// FUNCTION: publish_orderbook
+// PURPOSE:  Used for Market Data. Takes raw SBE bytes and sends them.
+//           Does NOT save to the buffer (we don't need history of old prices).
 // ============================================================================
 bool AeronPublisher::publish_orderbook(const char* buffer, size_t length) {
     return publish(buffer, length);
 }
 
 // ============================================================================
-// ✨ NEW: Check if order exists in buffer
+// FUNCTION: has_order_in_buffer
+// PURPOSE:  Duplicate Protection.
+//           Checks our local RAM to see if we already have an active trade
+//           for this symbol. 
+// RETURNS:  True if we are trading, False if we are free to open a new trade.
 // ============================================================================
 bool AeronPublisher::has_order_in_buffer(const std::string& symbol) const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -97,7 +110,10 @@ bool AeronPublisher::has_order_in_buffer(const std::string& symbol) const {
 }
 
 // ============================================================================
-// ✨ NEW: Get order from buffer
+// FUNCTION: get_order_from_buffer
+// PURPOSE:  Retrieves the details of an active trade.
+//           Used when we need to know "What price did I enter at?" so we
+//           can calculate Stop Loss or Take Profit levels.
 // ============================================================================
 AeronOrderRecord AeronPublisher::get_order_from_buffer(const std::string& symbol) const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -109,7 +125,10 @@ AeronOrderRecord AeronPublisher::get_order_from_buffer(const std::string& symbol
 }
 
 // ============================================================================
-// ✨ NEW: Remove order from buffer
+// FUNCTION: remove_order_from_buffer
+// PURPOSE:  "Crosses out" the sticky note. 
+//           Marks the order as inactive so the bot knows it is free to
+//           start a new trade cycle.
 // ============================================================================
 void AeronPublisher::remove_order_from_buffer(const std::string& symbol) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -121,7 +140,8 @@ void AeronPublisher::remove_order_from_buffer(const std::string& symbol) {
 }
 
 // ============================================================================
-// ✨ NEW: Update order in buffer
+// FUNCTION: update_order_in_buffer
+// PURPOSE:  Updates details (e.g., if we modified the price).
 // ============================================================================
 void AeronPublisher::update_order_in_buffer(const std::string& symbol, const AeronOrderRecord& order) {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -130,7 +150,9 @@ void AeronPublisher::update_order_in_buffer(const std::string& symbol, const Aer
 }
 
 // ============================================================================
-// ✨ NEW: Get all orders
+// FUNCTION: get_all_orders
+// PURPOSE:  Returns a copy of ALL active sticky notes. 
+//           Useful for printing a dashboard or status report.
 // ============================================================================
 std::unordered_map<std::string, AeronOrderRecord> AeronPublisher::get_all_orders() const {
     std::lock_guard<std::mutex> lock(buffer_mutex_);
@@ -138,7 +160,10 @@ std::unordered_map<std::string, AeronOrderRecord> AeronPublisher::get_all_orders
 }
 
 // ============================================================================
-// Original publish method
+// FUNCTION: publish (Private Helper)
+// PURPOSE:  The actual "Radio Transmission".
+//           It takes a raw byte pointer and tries to put it onto the 
+//           Aeron Shared Memory stream.
 // ============================================================================
 bool AeronPublisher::publish(const char* buffer, size_t length) {
     if (!publication_) return false;
@@ -166,7 +191,10 @@ uint64_t AeronPublisher::get_messages_sent() const {
 }
 
 // ============================================================================
-// Helper: Serialize order to string
+// FUNCTION: serialize_order
+// PURPOSE:  Converts the C++ struct into a simple text string like:
+//           "ORDER|12345|BTCUSDT|90000|0.1|Buy|...|1"
+//           This makes it easy for other programs (like Python) to read it.
 // ============================================================================
 std::string AeronPublisher::serialize_order(const AeronOrderRecord& order) {
     std::stringstream ss;
