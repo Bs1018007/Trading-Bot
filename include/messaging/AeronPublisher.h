@@ -13,7 +13,7 @@
 // 2. Strings crash Shared Memory (Aeron) because they contain pointers.
 struct AeronOrderRecord {
     char order_id[64];  // Fixed buffer for ID
-    char symbol[16];    // Fixed buffer for "BTCUSDT"
+    char symbol[32];    // Fixed buffer for "BTCUSDT"
     char side[8];       // Fixed buffer for "Buy"/"Sell"
     double price;
     double quantity;
@@ -24,12 +24,15 @@ struct AeronOrderRecord {
 class AeronPublisher {
 public:
     AeronPublisher(const std::string& channel, int32_t stream_id);
+    ~AeronPublisher() = default;
     
     bool init();
     
     // ✨ NEW: Order-specific publish methods
     bool publish_order(const AeronOrderRecord& order);
     bool publish_orderbook(const char* buffer, size_t length);
+
+    void service_context();
     
     // ✨ NEW: Order buffer management
     bool has_order_in_buffer(const std::string& symbol) const;

@@ -16,6 +16,7 @@ public:
         const std::vector<std::pair<double, double>>& bids,
         const std::vector<std::pair<double, double>>& asks
     );
+    void log(const std::string& tag, const std::string& message);
     
     void log_symbol_subscription(const std::vector<std::string>& symbols);
     void log_statistics(uint64_t messages, uint64_t aeron_published, size_t active_symbols);

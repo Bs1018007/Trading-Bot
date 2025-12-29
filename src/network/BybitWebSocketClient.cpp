@@ -11,7 +11,11 @@
 // ============================================================================
 // INTERNAL STRUCTURES
 // ============================================================================
+/*You are having struct SessionData because Network messages arrive in pieces (fragments), not always as one whole block.
 
+In networking (TCP and WebSockets), a large JSON message from Bybit might be split into 3 or 4 packets while traveling over the internet.
+
+SessionData acts as a Temporary Bucket to hold these pieces until the full message is ready to be read.*/
 struct SessionData {
     std::string rx_buffer;
 };
@@ -95,6 +99,8 @@ void BybitWebSocketClient::connect() {
     ccinfo.origin = ccinfo.address;
     ccinfo.protocol = protocols_[0].name;
     ccinfo.ssl_connection = LCCSCF_USE_SSL;
+    // In BybitWebSocketClient::connect()
+
 
     if (channel_type_ == ChannelType::PUBLIC) {
         ccinfo.path = "/v5/public/linear";
@@ -190,10 +196,12 @@ void BybitWebSocketClient::place_order(const std::string& symbol, const std::str
        << "}]}";
 
     std::string msg = ss.str();
-    
+
+    data_logger_.log("ORDER_REQ", msg);
+
     unsigned char buf[LWS_PRE + 2048];
     memcpy(&buf[LWS_PRE], msg.c_str(), msg.length());
-    
+
     int n = lws_write(wsi_, &buf[LWS_PRE], msg.length(), LWS_WRITE_TEXT);
     if (n < 0) std::cerr << "❌ Failed to send Place Order\n";
     else std::cout << "📤 Order Sent: " << order_link_id << " (" << side << " " << qty << " @ " << price << ")\n";
@@ -219,6 +227,8 @@ void BybitWebSocketClient::cancel_order(const std::string& symbol, const std::st
        << "}]}";
 
     std::string msg = ss.str();
+
+    data_logger_.log("CANCEL_REQ", msg);
     
     unsigned char buf[LWS_PRE + 1024];
     memcpy(&buf[LWS_PRE], msg.c_str(), msg.length());
@@ -240,7 +250,9 @@ void BybitWebSocketClient::subscribe_to_symbol(const std::string& symbol) {
     orderbook_manager_.get_or_create(symbol);
     
     std::stringstream sub_msg;
+    // In BybitWebSocketClient::subscribe_to_symbol
     sub_msg << "{\"op\":\"subscribe\",\"args\":[\"orderbook.50." << symbol << "\"]}";
+// Some testnet environments prefer "orderbook.1" for faster updates
     
     std::string msg = sub_msg.str();
     unsigned char buf[LWS_PRE + 1024];
@@ -315,15 +327,31 @@ int BybitWebSocketClient::callback_function(
 
 void BybitWebSocketClient::handle_message(char* data, size_t len) {
     try {
+        // 1. Create a string from the raw data for logging
+        std::string raw_message(data, len);
+
+        // ====================================================================
+        // [LOGGING] Write directly to File (No Terminal Output)
+        // ====================================================================
+        // This saves the exact JSON received from Bybit to your log file.
+        // Format: [TIMESTAMP] [MARKET_DATA] {"topic":"orderbook...","data":...}
+        data_logger_.log("MARKET_DATA", raw_message);
+
+
+        // ====================================================================
+
         simdjson::padded_string padded(data, len);
         simdjson::ondemand::document doc = parser_.iterate(padded);
         
+        // 0. Check for operational success messages
         auto success_result = doc["success"];
         if (!success_result.error() && success_result.get_bool().value()) {
-            std::cout << "✅ Subscription confirmed\n";
+            // Keep this one single print so you know subscription worked
+            std::cout << "✅ Subscription confirmed\n"; 
             return;
         }
         
+        // 1. Extract Symbol
         auto topic_result = doc["topic"];
         if (topic_result.error()) return;
         
@@ -333,10 +361,15 @@ void BybitWebSocketClient::handle_message(char* data, size_t len) {
         size_t last_dot = topic_str.rfind('.');
         if (last_dot == std::string::npos) return;
         std::string symbol(topic_str.substr(last_dot + 1));
-        
+
+        // 2. Identify Data Type (snapshot vs delta) 
         auto data_obj = doc["data"].get_object();
         auto orderbook = orderbook_manager_.get_or_create(symbol);
-        
+
+        // 3. Heartbeat Signal
+        orderbook->increment_update(); 
+
+        // 4. Parse Bids/Asks (Logic remains the same)
         std::vector<PriceLevel> bids, asks;
         
         auto bids_arr = data_obj["b"];
@@ -361,10 +394,11 @@ void BybitWebSocketClient::handle_message(char* data, size_t len) {
             }
         }
         
+        // 5. Apply updates
         if (!bids.empty()) orderbook->update_bids(bids);
         if (!asks.empty()) orderbook->update_asks(asks);
-        if (!bids.empty() || !asks.empty()) orderbook->increment_update();
         
+        // 6. Aeron Persistence (Logic remains the same)
         if (config_.enable_aeron && aeron_pub_) {
             auto timestamp = std::chrono::duration_cast<std::chrono::nanoseconds>(
                 std::chrono::system_clock::now().time_since_epoch()).count();
@@ -380,12 +414,19 @@ void BybitWebSocketClient::handle_message(char* data, size_t len) {
         messages_received_.fetch_add(1, std::memory_order_relaxed);
         
     } catch (const std::exception& e) {
+        // Only log errors to terminal so you know if something breaks
+        std::cerr << "⚠️  Orderbook Parse Error: " << e.what() << "\n";
     }
 }
 
 // [CRITICAL FIX AREA]
 void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
     try {
+
+        std::string raw_message(data, len);
+        data_logger_.log("ORDER_RES", raw_message);
+
+
         simdjson::padded_string padded(data, len);
         simdjson::ondemand::document doc = parser_.iterate(padded);
         
@@ -413,6 +454,7 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
                      // SUCCESS: Get the Client ID (orderLinkId)
                      // [FIX] We fetch 'orderLinkId' instead of 'orderId' to match TradingEngine
                      auto orderLinkId = doc["data"]["orderLinkId"].get_string().value();
+
                      std::cout << "✅ Order Accepted (Link ID: " << orderLinkId << ")\n";
                      
                      // [FIX] Uncommented and active

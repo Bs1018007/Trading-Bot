@@ -24,6 +24,7 @@ public:
     
     void increment_update();
     uint64_t get_update_count() const;
+    
 
 private:
     std::array<PriceLevel, MAX_LEVELS> bids_;

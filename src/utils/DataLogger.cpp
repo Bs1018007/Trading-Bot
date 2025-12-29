@@ -5,6 +5,7 @@
 #include <chrono>
 #include <ctime>
 #include <algorithm>
+#include <sys/stat.h> // Required for mkdir
 
 DataLogger::DataLogger(const std::string& filename) {
     auto now = std::chrono::system_clock::now();
@@ -14,8 +15,8 @@ DataLogger::DataLogger(const std::string& filename) {
     ss << std::put_time(std::localtime(&time), "%Y%m%d_%H%M%S");
     log_file_path = "logs/" + ss.str() + "_" + filename;
     
-    // Create logs directory
-    system("mkdir -p logs");
+    // Create logs directory (Linux/macOS)
+    mkdir("logs", 0777);
     
     log_file.open(log_file_path, std::ios::app);
     if (log_file.is_open()) {
@@ -58,17 +59,15 @@ void DataLogger::log_orderbook(
     if (!log_file.is_open()) return;
     
     log_file << "[" << get_timestamp() << "] "
-              << symbol << " | Fair Pice: $" << std::fixed 
+              << symbol << " | Fair Price: $" << std::fixed 
               << std::setprecision(2) << mid_price << "\n";
     
-    // Log top 5 bids
     log_file << "  BIDS: ";
     for (size_t i = 0; i < std::min(size_t(5), bids.size()); ++i) {
         log_file << bids[i].first << "(" << bids[i].second << ") ";
     }
     log_file << "\n";
     
-    // Log top 5 asks
     log_file << "  ASKS: ";
     for (size_t i = 0; i < std::min(size_t(5), asks.size()); ++i) {
         log_file << asks[i].first << "(" << asks[i].second << ") ";
@@ -114,4 +113,17 @@ void DataLogger::log_error(const std::string& error_message) {
 
 std::string DataLogger::get_log_path() const {
     return log_file_path;
+}
+
+// [FIXED] Updated to use correct member variables
+void DataLogger::log(const std::string& tag, const std::string& message) {
+    std::lock_guard<std::mutex> lock(log_mutex); // Fixed: file_mutex_ -> log_mutex
+    
+    if (log_file.is_open()) { // Fixed: log_file_ -> log_file
+        log_file << "[" << get_timestamp() << "] " // Fixed: get_current_time -> get_timestamp
+                  << "[" << tag << "] "
+                  << message << "\n";
+        
+        log_file.flush(); 
+    }
 }
