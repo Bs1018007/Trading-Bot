@@ -22,14 +22,14 @@ struct BotConfiguration {
     }
 
     // Trading symbols to monitor
-    std::vector<std::string> symbols = {"BTCUSDT", "ETHUSDT", "SOLUSDT"};
+    std::vector<std::string> symbols = {"ETHUSDT","BTCUSDT", "SOLUSDT"};
     
     // API credentials (loaded from constructor)
     std::string api_key;
     std::string api_secret;
     
     // Trading parameters
-    double trade_quantity = 0.001; // Adjusted to valid min size for BTC
+    double trade_quantity = 0.02; // Adjusted to valid min size for BTC
     int max_orders_per_second = 10; // Realistic rate limit
     bool enable_trading = false;
     

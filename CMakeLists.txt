@@ -177,6 +177,7 @@ target_link_libraries(trading_bot PRIVATE
     ${AERON_DRIVER_LIB}
     ${AERON_C_LIB}
     ${CMAKE_DL_LIBS}
+    
 )
 
 # Platform-specific linking

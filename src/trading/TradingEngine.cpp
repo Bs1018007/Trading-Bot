@@ -46,7 +46,7 @@ TradingEngine::TradingEngine(
     std::cout << "Stop Loss:        -0.10% (-0.001)\n\n";
 
     // --- 1. Initialize Risk Parameters ---
-    base_quantity_ = 0.001;          // Starting trade size (e.g., 0.001 BTC)
+    base_quantity_ = 0.02;          // Starting trade size (e.g., 0.001 BTC)
     current_qty_ = base_quantity_;   // Current trade size (will double on loss)
     martingale_step_ = 0;            // Tracks consecutive losses
     max_martingale_steps_ = 6;       // Stop doubling after 6 losses to prevent blow-up
@@ -236,7 +236,7 @@ void TradingEngine::evaluate_entry_signal() {
     // If Shorting: Sell below Bid (Crossing the spread down).
     // If Longing: Buy above Ask (Crossing the spread up).
     // The +/- 500.0 buffer ensures we match even if price moves slightly.
-    double price = is_short_ ? (best_bid - 500.0) : (best_ask + 500.0);
+    double price = is_short_ ? (best_bid - 5.0) : (best_ask + 5.0);
     
     place_order(price, is_short_);
 }

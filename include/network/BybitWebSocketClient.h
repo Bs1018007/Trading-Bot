@@ -21,7 +21,8 @@ class BybitWebSocketClient {
 public:
     enum class ChannelType {
         PUBLIC,
-        PRIVATE_TRADE
+        PRIVATE_TRADE,
+        PRIVATE_STREAM
     };
 
     // Callback Definition
@@ -44,6 +45,7 @@ public:
 
     // Market Data
     void subscribe_to_symbol(const std::string& symbol);
+    void subscribe_to_private_topics();
     
     // Trading Execution
     void authenticate();

@@ -71,10 +71,19 @@ int main() {
         BybitWebSocketClient::ChannelType::PRIVATE_TRADE
     );
 
+    BybitWebSocketClient stream_client(
+        orderbook_manager, 
+        symbol_manager, 
+        config, 
+        data_logger, 
+        BybitWebSocketClient::ChannelType::PRIVATE_STREAM 
+    );
+
     // 5. Connect WebSocket clients
     std::cout << "\n🔌 Connecting to Bybit WebSocket...\n";
     public_client.connect();
-    trade_client.connect();   
+    trade_client.connect();  
+    stream_client.connect(); 
 
     // 6. Start WebSocket service threads
     std::thread public_thread([&]() { 
@@ -86,11 +95,17 @@ int main() {
         std::cout << "  ✓ Trade WS thread started\n";
         trade_client.run(); 
     });
+    std::thread stream_thread([&]() { 
+        std::cout << "  ✓ Stream WS thread started\n";
+        stream_client.run(); 
+    });
+
+
 
     // 7. Wait for WebSocket connections
     std::cout << "⏳ Waiting for WebSocket connections";
     int connection_timeout = 0;
-    while ((!public_client.is_connected() || !trade_client.is_connected()) && g_running) {
+    while ((!public_client.is_connected() || !trade_client.is_connected() || !stream_client.is_connected()) && g_running) {
         if (connection_timeout++ > 100) {  // 10 second timeout
             std::cerr << "\n❌ Connection timeout. Exiting.\n";
             g_running = false;
@@ -112,12 +127,15 @@ int main() {
     // 8. Authenticate private channel
     std::cout << "\n🔐 Authenticating...\n";
     trade_client.authenticate();
+    stream_client.authenticate();
     std::this_thread::sleep_for(std::chrono::seconds(2));  // Wait for auth response
 
     // 9. Subscribe to trading symbol
     std::string trading_symbol = config.symbols.empty() ? "BTCUSDT" : config.symbols[0];
     std::cout << "📡 Subscribing to " << trading_symbol << "...\n";
     public_client.subscribe_to_symbol(trading_symbol);
+    std::cout << "📡 Subscribing to private execution stream...\n";
+    stream_client.subscribe_to_private_topics();
     std::this_thread::sleep_for(std::chrono::milliseconds(1500));  // Wait for initial data
 
     // 10. Initialize Trading Engine
@@ -129,6 +147,12 @@ int main() {
         data_logger,
         &trade_client,
         aeron_publisher
+    );
+
+    stream_client.set_order_update_callback(
+        [&engine](const std::string& id, const std::string& status, const std::string& sym) {
+            engine.on_order_update(id, status);
+        }
     );
 
     // 11. [CRITICAL FIX] Start Aeron service thread
@@ -183,11 +207,13 @@ int main() {
     // Stop WebSocket clients
     public_client.stop();
     trade_client.stop();
+    stream_client.stop();
     
     // Wait for threads to finish
     std::cout << "  ⏳ Waiting for WebSocket threads...\n";
     if (public_thread.joinable()) public_thread.join();
     if (trade_thread.joinable()) trade_thread.join();
+    if (stream_thread.joinable()) stream_thread.join();
     std::cout << "  ✓ WebSocket threads stopped\n";
     
     // Stop Aeron service thread

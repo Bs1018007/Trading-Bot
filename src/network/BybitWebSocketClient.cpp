@@ -41,7 +41,7 @@ BybitWebSocketClient::BybitWebSocketClient(
     data_logger_(logger),
     channel_type_(type) 
 {
-    if (channel_type_ == ChannelType::PRIVATE_TRADE) {
+    if (channel_type_ == ChannelType::PRIVATE_TRADE || channel_type_ == ChannelType::PRIVATE_STREAM) {
         api_key_ = config_.api_key;
         api_secret_ = config_.api_secret;
 
@@ -104,8 +104,10 @@ void BybitWebSocketClient::connect() {
 
     if (channel_type_ == ChannelType::PUBLIC) {
         ccinfo.path = "/v5/public/linear";
-    } else {
+    } else if (channel_type_ == ChannelType::PRIVATE_TRADE) {
         ccinfo.path = "/v5/trade";
+    } else{
+        ccinfo.path = "/v5/private";
     }
     
     wsi_ = lws_client_connect_via_info(&ccinfo);
@@ -144,7 +146,7 @@ std::string BybitWebSocketClient::generate_signature(long long expires) {
 }
 
 void BybitWebSocketClient::authenticate() {
-    if (channel_type_ != ChannelType::PRIVATE_TRADE) return;
+    if (channel_type_ == ChannelType::PUBLIC) return;
     
     long long expires = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count() + 10000;
@@ -187,11 +189,11 @@ void BybitWebSocketClient::place_order(const std::string& symbol, const std::str
        << "\"args\":[{"
        <<    "\"symbol\":\"" << symbol << "\","
        <<    "\"side\":\"" << side << "\","
-       <<    "\"orderType\":\"Limit\","
+       <<    "\"orderType\":\"Market\","
        <<    "\"qty\":\"" << qty << "\","
-       <<    "\"price\":\"" << price << "\","
+       //<<    "\"price\":\"" << price << "\","
        <<    "\"category\":\"linear\","
-       <<    "\"timeInForce\":\"PostOnly\","
+       <<    "\"timeInForce\":\"IOC\","
        <<    "\"orderLinkId\":\"" << order_link_id << "\""
        << "}]}";
 
@@ -422,23 +424,38 @@ void BybitWebSocketClient::handle_message(char* data, size_t len) {
 // [CRITICAL FIX AREA]
 void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
     try {
-
+        // [LOGGING] Log raw message for debugging
         std::string raw_message(data, len);
         data_logger_.log("ORDER_RES", raw_message);
-
+        
+        // Print to console if it's a topic update or an operation result
+        if (raw_message.find("\"topic\"") != std::string::npos || raw_message.find("\"op\"") != std::string::npos) {
+            // Truncate long messages for cleaner console output
+            std::cout << "🧪 Private Raw: " << raw_message.substr(0, 200) << (raw_message.length() > 200 ? "..." : "") << std::endl;
+        }
 
         simdjson::padded_string padded(data, len);
         simdjson::ondemand::document doc = parser_.iterate(padded);
         
-        // 1. Check Operation Responses
+        // ====================================================================
+        // 1. Handle Operation Responses (Auth, Subscribe, Order Ack)
+        // ====================================================================
         auto op_result = doc["op"];
         if (!op_result.error()) {
             std::string_view op = op_result.get_string().value();
             
+            // --- Authentication ---
             if (op == "auth") {
                 auto ret_code = doc["retCode"].get_int64().value();
                 if (ret_code == 0) {
                     std::cout << "🔐 Authentication SUCCESS\n";
+                    // Subscribe to LINEAR (Perpetual) topics
+                    std::string sub_msg = R"({"op":"subscribe","args":["order.linear","execution.linear"]})";
+                    
+                    unsigned char buf[LWS_PRE + 1024];
+                    memcpy(&buf[LWS_PRE], sub_msg.c_str(), sub_msg.length());
+                    lws_write(wsi_, &buf[LWS_PRE], sub_msg.length(), LWS_WRITE_TEXT);
+                    std::cout << "📡 Subscribed to private topics: order.linear, execution.linear\n";
                 } else {
                     auto msg = doc["retMsg"].get_string().value();
                     std::cerr << "❌ Authentication FAILED: " << msg << "\n";
@@ -446,36 +463,30 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
                 return;
             }
 
-            // [FIXED] Order Create Ack
+            // --- Order Creation Acknowledgment ---
             if (op == "order.create") {
                 auto ret_code = doc["retCode"].get_int64().value();
                 
                 if (ret_code == 0) {
-                     // SUCCESS: Get the Client ID (orderLinkId)
-                     // [FIX] We fetch 'orderLinkId' instead of 'orderId' to match TradingEngine
                      auto orderLinkId = doc["data"]["orderLinkId"].get_string().value();
-
                      std::cout << "✅ Order Accepted (Link ID: " << orderLinkId << ")\n";
-                     
-                     // [FIX] Uncommented and active
-                     if (on_order_update_) {
-                         on_order_update_(std::string(orderLinkId), "New", ""); 
-                     }
+                     // We do NOT trigger on_order_update_ here; we wait for the "order" or "execution" stream
                 } else {
-                     // FAILURE
                      auto msg = doc["retMsg"].get_string().value();
                      std::cerr << "❌ Order REJECTED: " << msg << "\n";
                      
-                     // [FIX] Uncommented and active
-                     // Use reqId as fallback to identify which order failed
-                     auto reqId = doc["reqId"].get_string().value();
+                     // Safely try to get reqId to notify strategy
+                     auto reqIdRes = doc["reqId"];
+                     std::string reqId = (!reqIdRes.error()) ? std::string(reqIdRes.get_string().value()) : "unknown";
+                     
                      if (on_order_update_) {
-                         on_order_update_(std::string(reqId), "Rejected", "");
+                         on_order_update_(reqId, "Rejected", std::string(msg));
                      }
                 }
                 return;
             }
             
+            // --- Order Cancellation Acknowledgment ---
             if (op == "order.cancel") {
                 auto ret_code = doc["retCode"].get_int64().value();
                 if (ret_code == 0) {
@@ -488,26 +499,47 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
             }
         }
         
-        // 2. Handle Real-Time Execution Reports (Topic: execution)
-        // This confirms fills/trades asynchronously
+        // ====================================================================
+        // 2. Handle Real-Time Data Pushes (Topics)
+        // ====================================================================
         auto topic_res = doc["topic"];
         if (!topic_res.error()) {
             std::string_view topic = topic_res.get_string().value();
-            if (topic == "execution") {
-                 auto data_arr = doc["data"].get_array();
-                 for (auto item : data_arr) {
-                     // Extract the BOT ID and the status
-                     auto oid = item["orderLinkId"].get_string().value();
-                     // Send "Filled" signal to engine
-                     if (on_order_update_) {
-                         on_order_update_(std::string(oid), "Filled", "");
-                     }
-                 }
+
+            // --- CASE A: Execution Reports (Fills/Trades) ---
+            // Note: We use .find() because topic might be "execution.linear"
+            if (topic.find("execution") != std::string_view::npos) {
+                auto data_arr = doc["data"].get_array();
+                for (auto item : data_arr) {
+                    auto oid = item["orderLinkId"].get_string().value();
+                    
+                    // Ideally, check "execType" to ensure it is a Trade and not Funding
+                    // but keeping your original simple logic for now:
+                    if (on_order_update_) {
+                        on_order_update_(std::string(oid), "Filled", "");
+                    }
+                }
             }
-        }
-        
+            
+            // --- CASE B: Order Status Updates (New, Cancelled, Rejected, etc.) ---
+            // [CRITICAL FIX] This is now an else-if, and properly outside the previous block
+            else if (topic.find("order") != std::string_view::npos) {
+                auto data_arr = doc["data"].get_array();
+                for (auto item : data_arr) {
+                    std::string_view order_link_id = item["orderLinkId"].get_string().value();
+                    std::string_view status = item["orderStatus"].get_string().value(); 
+                    
+                    std::cout << "📊 Order Status Update: " << order_link_id << " → " << status << "\n";
+                    
+                    if (on_order_update_) {
+                        on_order_update_(std::string(order_link_id), std::string(status), "");
+                    }
+                }
+            }
+        } // End of topic check
+
     } catch (const std::exception& e) {
-        std::cerr << "⚠️  Trade Msg Error: " << e.what() << "\n";
+        std::cerr << "⚠️  Private Stream Error: " << e.what() << "\n";
     }
 }
 
@@ -521,4 +553,15 @@ uint64_t BybitWebSocketClient::get_message_count() const {
 
 uint64_t BybitWebSocketClient::get_aeron_count() const {
     return aeron_published_.load();
+}
+
+void BybitWebSocketClient::subscribe_to_private_topics() {
+    if (channel_type_ != ChannelType::PRIVATE_STREAM) return;
+    
+    // Subscribe to "execution" (fills) and "order" (status changes)
+    std::string msg = R"({"op":"subscribe","args":["execution","order"]})";
+    
+    unsigned char buf[LWS_PRE + 1024];
+    memcpy(&buf[LWS_PRE], msg.c_str(), msg.length());
+    lws_write(wsi_, &buf[LWS_PRE], msg.length(), LWS_WRITE_TEXT);
 }
