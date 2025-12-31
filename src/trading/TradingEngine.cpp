@@ -46,12 +46,12 @@ TradingEngine::TradingEngine(
     std::cout << "Stop Loss:        -0.10% (-0.001)\n\n";
 
     // --- 1. Initialize Risk Parameters ---
-    base_quantity_ = 0.02;          // Starting trade size (e.g., 0.001 BTC)
+    base_quantity_ = 0.01;          // Starting trade size (e.g., 0.001 BTC)
     current_qty_ = base_quantity_;   // Current trade size (will double on loss)
     martingale_step_ = 0;            // Tracks consecutive losses
-    max_martingale_steps_ = 6;       // Stop doubling after 6 losses to prevent blow-up
+    max_martingale_steps_ = 100000;       // Stop doubling after 6 losses to prevent blow-up
     profit_target_percent_ = 0.0005; // 0.05% gain target
-    stop_loss_percent_ = -0.001;     // -0.10% loss limit
+    stop_loss_percent_ = -0.0005;     // -0.05% loss limit
     cumulative_loss_ = 0.0;          // Total dollars lost in current sequence
     
     // --- 2. Initialize State Variables ---
@@ -222,23 +222,33 @@ bool TradingEngine::validate_market_data() {
 /**
  * @brief Decides the price and direction for entering a new trade.
  */
+// In src/trading/TradingEngine.cpp
+
 void TradingEngine::evaluate_entry_signal() {
     auto ob = orderbook_manager_.get(symbol_);
     double best_bid, best_ask, dummy;
-    
-    // Re-fetch latest prices
-    if (!ob->get_best_bid(best_bid, dummy) || !ob->get_best_ask(best_ask, dummy)) {
-        return;
-    }
+    if (!ob->get_best_bid(best_bid, dummy) || !ob->get_best_ask(best_ask, dummy)) return;
 
-    // STRATEGY: Aggressive Taker
-    // We want to fill immediately.
-    // If Shorting: Sell below Bid (Crossing the spread down).
-    // If Longing: Buy above Ask (Crossing the spread up).
-    // The +/- 500.0 buffer ensures we match even if price moves slightly.
-    double price = is_short_ ? (best_bid - 5.0) : (best_ask + 5.0);
+    double price = 0.0;
     
-    place_order(price, is_short_);
+    // STRATEGY: Mid-Market (Faster Fills for Maker)
+    // We calculate the middle of the spread.
+    double mid_price = (best_bid + best_ask) / 2.0;
+
+    if (!is_short_) {
+        // Buying: Offer slightly above middle
+        price = mid_price + 0.1; 
+        if (price >= best_ask) price = best_ask - 0.005; // Safety cap
+    } else {
+        // Selling: Offer slightly below middle
+        price = mid_price - 0.1;
+        if (price <= best_bid) price = best_bid + 0.005; // Safety cap
+    }
+    
+    std::cout << "🤝 MID-MARKET ENTRY: Placing order at " << price << "\n";
+    
+    // Still using Maker (PostOnly) to save fees
+    place_order(price, is_short_, true); 
 }
 
 // ============================================================================
@@ -250,43 +260,55 @@ void TradingEngine::evaluate_entry_signal() {
  */
 void TradingEngine::monitor_working_order() {
     auto now = std::chrono::steady_clock::now();
-    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - state_entry_time_).count();
+    auto elapsed_ms = std::chrono::duration_cast<std::chrono::milliseconds>(now - state_entry_time_).count();
+
+    // 1. TIME LIMIT CHECK (The Fix)
+    // If the order is older than 3000ms (3 seconds) and hasn't filled, CANCEL IT.
+    // This forces the bot to "wake up" and re-evaluate the price.
+    if (elapsed_ms > 10000) {
+        std::cout << "⏰ Order stale (" << elapsed_ms << "ms). Cancelling to refresh...\n";
+        if (trade_client_) {
+            trade_client_->cancel_order(symbol_, active_order_id_);
+            current_state_ = BotState::CANCELLING;
+            state_entry_time_ = now;
+        }
+        return; 
+    }
     
-    // Give the order at least 2 seconds to fill naturally before cancelling.
-    if (elapsed < 2000) return;
-    
+    // 2. PRICE DRIFT CHECK (Existing Logic)
+    // Only run this if the order is "young" (less than 3 seconds)
+    if (elapsed_ms < 500) return; // Wait 0.5s before checking price
+
     auto ob = orderbook_manager_.get(symbol_);
     double best_bid, best_ask, dummy;
     if (!ob->get_best_bid(best_bid, dummy) || !ob->get_best_ask(best_ask, dummy)) return;
 
-    double chase_threshold = 10.0; // If price moves $10 away, we chase.
     bool chase_needed = false;
 
     if (!is_short_) { 
-        // We are Buying. If Best Bid moves UP past our price, we are too low.
-        if (best_bid > active_order_price_ + chase_threshold) {
-            std::cout << "📉 Market moved up away from us. Chasing...\n";
+        // Buying: If Best Bid moves ABOVE us, we are losing.
+        // Make this sensitive: If we are beaten by even $0.05, chase.
+        if (best_bid > active_order_price_ + 0.05) { 
+            std::cout << "📉 Lost Top Spot! (Bid: " << best_bid << "). Chasing...\n";
             chase_needed = true;
         }
     } 
     else { 
-        // We are Selling. If Best Ask moves DOWN past our price, we are too high.
-        if (best_ask < active_order_price_ - chase_threshold) {
-            std::cout << "📈 Market moved down away from us. Chasing...\n";
+        // Selling: If Best Ask moves BELOW us, we are losing.
+        if (best_ask < active_order_price_ - 0.05) {
+            std::cout << "📈 Lost Top Spot! (Ask: " << best_ask << "). Chasing...\n";
             chase_needed = true;
         }
     }
 
     if (chase_needed) {
-        std::cout << "🔄 Cancelling order to re-place at better level...\n";
         if (trade_client_) {
             trade_client_->cancel_order(symbol_, active_order_id_);
-            current_state_ = BotState::CANCELLING; // Lock state while cancelling
-            state_entry_time_ = std::chrono::steady_clock::now();
+            current_state_ = BotState::CANCELLING; 
+            state_entry_time_ = now;
         }
     }
 }
-
 // ============================================================================
 // PNL MANAGEMENT: PROFIT & LOSS
 // ============================================================================
@@ -295,50 +317,82 @@ void TradingEngine::monitor_working_order() {
  * Closes position if Target or Stop Loss is hit.
  */
 void TradingEngine::manage_open_position() {
-    if (!position_filled_) return; // Sanity check
+    if (!position_filled_) return;
 
+    // 1. Get Market Data
     auto ob = orderbook_manager_.get(symbol_);
     double best_bid, best_ask, dummy;
     if (!ob->get_best_bid(best_bid, dummy) || !ob->get_best_ask(best_ask, dummy)) return;
 
-    // Calculate Exit Price
-    // If Short, we exit by Buying at Ask. If Long, we exit by Selling at Bid.
-    double current_price = is_short_ ? best_ask : best_bid;  
+    double current_market_price = is_short_ ? best_ask : best_bid;  
+    
+    // 2. Calculate PnL
     double pnl_percent = 0.0;
-
-    // Formula: (Exit - Entry) / Entry  [Reversed for shorts]
     if (is_short_) {
-        pnl_percent = (entry_price_ - current_price) / entry_price_;
+        pnl_percent = (entry_price_ - current_market_price) / entry_price_;
     } else {
-        pnl_percent = (current_price - entry_price_) / entry_price_;
+        pnl_percent = (current_market_price - entry_price_) / entry_price_;
     }
 
-    // Update stats for display
     last_pnl_percent_ = pnl_percent;
     last_pnl_dollars_ = pnl_percent * entry_price_ * current_qty_;
 
-    // DECISION LOGIC
-    if (pnl_percent >= profit_target_percent_) {
-        std::cout << "\n✅ TARGET HIT! (+" << (pnl_percent * 100) << "%)\n";
-        close_position_with_profit();
-    }
-    else if (pnl_percent <= stop_loss_percent_) {
-        std::cout << "\n🛑 STOP LOSS! (" << (pnl_percent * 100) << "%)\n";
-        
-        // Check if we can still double down (Martingale)
+    // 3. CHECK STOP LOSS
+    if (pnl_percent <= stop_loss_percent_) {
+        std::cout << "\n🛑 STOP LOSS HIT: " << (pnl_percent * 100) << "% (Price: " << current_market_price << ")\n";
+
+        // A. Cancel the resting Profit Order first (Unlock the coins)
+        if (trade_client_ && !active_exit_order_id_.empty()) {
+            std::cout << "  ⚡ Cancelling Profit Order (" << active_exit_order_id_ << ") to execute Stop Loss...\n";
+            trade_client_->cancel_order(symbol_, active_exit_order_id_);
+            active_exit_order_id_ = ""; 
+        }
+
+        // B. Decide: Hard Stop or Martingale Reverse?
         if (martingale_step_ < max_martingale_steps_) {
-            close_position_with_loss();
+             std::cout << "  🔄 PREPARING REVERSAL: Closing now, will Double & Reverse on fill.\n";
+             
+             // Set a flag so on_order_update knows to reverse
+             trigger_martingale_on_close_ = true; 
+             
+             close_position(); // Send Market Exit
         } else {
-            // Too many losses in a row. Stop doubling.
-            close_position_and_reset();
+             std::cout << "  🛑 Max Steps. Hard Stop.\n";
+             trigger_martingale_on_close_ = false;
+             close_position_and_reset();
         }
     }
 }
+/*void TradingEngine::execute_average_down(double current_market_price) {
+    if (!trade_client_) return;
+
+    // 1. Calculate how much to add (Doubling: Add equal to current holdings)
+    // Example: Hold 0.01 -> Buy 0.01 -> Total 0.02
+    // Example: Hold 0.02 -> Buy 0.02 -> Total 0.04
+    double quantity_to_add = current_qty_; 
+
+    // 2. Prepare Order
+    active_order_id_ = generate_id();
+    std::string side = is_short_ ? "Sell" : "Buy"; // SAME DIRECTION
+    
+    // 3. Set Flags
+    is_averaging_ = true;             // Tell system we are adding, not entering new
+    current_state_ = BotState::PLACING_ORDER;
+    state_entry_time_ = std::chrono::steady_clock::now();
+    active_order_price_ = current_market_price; // Track for chase logic if needed
+
+    std::cout << "➕ AVERAGING: Adding " << quantity_to_add << " " << side 
+              << " @ " << current_market_price << "\n";
+
+    // 4. Send Taker Order (Fill Immediately)
+    // Using current_market_price ensures immediate fill (Taker)
+    trade_client_->place_order(symbol_, side, quantity_to_add, current_market_price, active_order_id_, false);
+}*/
 
 // ============================================================================
 // CLOSE LOGIC: STATE TRANSITIONS
 // ============================================================================
-void TradingEngine::close_position_with_profit() {
+/*void TradingEngine::close_position_with_profit() {
     total_trades_++;
     winning_trades_++;
     total_profit_ += last_pnl_dollars_;
@@ -359,9 +413,11 @@ void TradingEngine::close_position_with_loss() {
     
     close_position(); // Send the exit order
     
-    // Set state to RECOVERING so we calculate the double-down next cycle
-    current_state_ = BotState::RECOVERING;
-}
+    std::cout << "📉 Trade Lost. Resetting to Base Size (No Martingale).\n";
+    current_qty_ = base_quantity_; // Reset size to 0.01 (or whatever base is)
+    martingale_step_ = 0;          // Reset step count
+    current_state_ = BotState::IDLE;
+}*/
 
 void TradingEngine::close_position_and_reset() {
     total_trades_++;
@@ -416,7 +472,7 @@ void TradingEngine::close_position() {
     std::cout << "📤 CLOSING Position (" << side << " @ " << price 
               << ") Entry was: " << entry_price_ << "\n";
               
-    trade_client_->place_order(symbol_, side, current_qty_, price, active_order_id_);
+    trade_client_->place_order(symbol_, side, current_qty_, price, active_order_id_,false);
     
     // Clean up Aeron buffer
     if (aeron_publisher_) aeron_publisher_->remove_order_from_buffer(symbol_);
@@ -425,7 +481,7 @@ void TradingEngine::close_position() {
 // ============================================================================
 // EXECUTION: SENDING ORDERS
 // ============================================================================
-void TradingEngine::place_order(double price, bool is_short) {
+void TradingEngine::place_order(double price, bool is_short,bool is_maker) {
     if (!trade_client_) return;
 
     active_order_id_ = generate_id();
@@ -440,7 +496,7 @@ void TradingEngine::place_order(double price, bool is_short) {
     position_filled_ = false;
 
     std::cout << "📤 Sending " << side << " @ " << price << " (ID: " << active_order_id_ << ")\n";
-    trade_client_->place_order(symbol_, side, current_qty_, price, active_order_id_);
+    trade_client_->place_order(symbol_, side, current_qty_, price, active_order_id_,is_maker);
 
     // SBE Logging (High Speed Binary Logging via Aeron)
     if (aeron_publisher_) {
@@ -460,52 +516,142 @@ void TradingEngine::place_order(double price, bool is_short) {
 /**
  * @brief Called by BybitWebSocketClient when an order status changes.
  */
+// ============================================================================
+// ORDER UPDATE HANDLER: CALLBACK
+// ============================================================================
+/**
+ * @brief Called by BybitWebSocketClient when an order status changes.
+ * IMPLEMENTS: Stop-and-Reverse Martingale & Instant Exit Posting
+ */
 void TradingEngine::on_order_update(const std::string& order_id, const std::string& status) {
-    if (order_id != active_order_id_) {
-        // Ignore updates for old/unknown orders
+    // 1. START TIMER (Measure Latency correctly)
+    auto start_time = std::chrono::high_resolution_clock::now();
+
+    // 2. Ignore updates for orders we don't care about
+    // We check both the active entry ID and the active exit ID
+    if (order_id != active_order_id_ && order_id != active_exit_order_id_) {
         return;
     }
 
     std::cout << "⚡ Update [" << order_id.substr(0, 15) << "...]: " << status << "\n";
 
+    // ---------------------------------------------------------
+    // STATUS: NEW (Order Accepted)
+    // ---------------------------------------------------------
     if (status == "New") {
-        if (current_state_ == BotState::PLACING_ORDER) {
+        if (current_state_ == BotState::PLACING_ORDER && order_id == active_order_id_) {
             std::cout << "  ↳ Order accepted, now working...\n";
             current_state_ = BotState::WORKING;
             state_entry_time_ = std::chrono::steady_clock::now();
         }
     }
+    // ---------------------------------------------------------
+    // STATUS: FILLED (Trade Executed)
+    // ---------------------------------------------------------
     else if (status == "Filled") {
-        // Check if this was an EXIT or an ENTRY
+        
+        // CASE A: We just CLOSED a position (Profit Take or Stop Loss)
         if (waiting_for_close_) {
-            std::cout << "✅ Exit Filled. Cycle Complete.\n";
+            std::cout << "✅ Position Closed.\n";
+            
+            // Clear flags
             waiting_for_close_ = false;
             position_filled_ = false;
-            
-            // If we are recovering (after loss), stay in RECOVERING state.
-            // If profitable, go to IDLE.
-            if (current_state_ != BotState::RECOVERING) {
+            active_exit_order_id_ = ""; 
+
+            // LOGIC: Check if this was a Stop Loss that requires Reversal
+            if (trigger_martingale_on_close_) {
+                std::cout << "⚡ LOSS REALIZED. Triggering Stop-and-Reverse...\n";
+                
+                // 1. Martingale Math: Flip Side, Double Size
+                martingale_step_++;
+                current_qty_ *= 2.0;       // Double the size
+                is_short_ = !is_short_;    // Flip Direction (Long <-> Short)
+                
+                // 2. Reset Trigger Flag
+                trigger_martingale_on_close_ = false;
+
+                // 3. Set State to IDLE 
+                // This forces the main loop to call evaluate_entry_signal() IMMEDIATELY,
+                // which will place the new reversed order at the new size.
+                current_state_ = BotState::IDLE; 
+                
+                std::cout << "🚀 REVERSING: New Qty " << current_qty_ 
+                          << " | Direction: " << (is_short_ ? "SHORT" : "LONG") << "\n";
+            } 
+            else {
+                // Standard Profit Take -> Reset to Base Risk
+                std::cout << "💰 Cycle Complete (Profit). Resetting to Base Size.\n";
+                martingale_step_ = 0;
+                current_qty_ = base_quantity_; 
                 current_state_ = BotState::IDLE;
             }
-        } else {
-            std::cout << "✅ Entry Filled. Monitoring PnL...\n";
-            current_state_ = BotState::IN_POSITION;
+        }
+        
+        // CASE B: We just OPENED a position (Entry Filled)
+        // Action: Post the Exit Order IMMEDIATELY
+        else if (order_id == active_order_id_) {
+            std::cout << "✅ Entry Filled. Placing Exit Order IMMEDIATELY...\n";
             position_filled_ = true;
-            position_entry_time_ = std::chrono::steady_clock::now();
+            current_state_ = BotState::IN_POSITION;
+
+            // 1. Calculate Target Price (Take Profit)
+            double target_price;
+            if (is_short_) {
+                // If Short, buy back lower
+                target_price = entry_price_ * (1.0 - profit_target_percent_);
+            } else {
+                // If Long, sell higher
+                target_price = entry_price_ * (1.0 + profit_target_percent_);
+            }
+
+            // 2. Generate ID and Send the Exit Order NOW
+            std::string exit_side = is_short_ ? "Buy" : "Sell";
+            active_exit_order_id_ = generate_id(); 
+
+            std::cout << "⚡ POSTING EXIT: " << exit_side << " @ " << target_price << "\n";
+            
+            // Pass 'true' for Maker (PostOnly) to ensure we get paid for liquidity
+            if (trade_client_) {
+                trade_client_->place_order(symbol_, exit_side, current_qty_, target_price, active_exit_order_id_, true);
+            }
         }
     }
-    else if (status == "Cancelled") {
-        std::cout << "🚫 Order Cancelled. Back to IDLE.\n";
-        current_state_ = BotState::IDLE;
-        waiting_for_close_ = false;
-        position_filled_ = false;
+    // ---------------------------------------------------------
+    // STATUS: CANCELLED / REJECTED
+    // ---------------------------------------------------------
+    else if (status == "Cancelled" || status == "Rejected") {
+        std::cout << "🚫 Order " << status << ".\n";
+        
+        // If the Exit Order was cancelled (e.g., manually or by Stop Loss logic), we are still in position
+        if (order_id == active_exit_order_id_) {
+             std::cout << "  ↳ Exit order cancelled. Position is UNLOCKED.\n";
+             active_exit_order_id_ = "";
+             // We stay IN_POSITION so manage_open_position can execute the Stop Loss market order
+             current_state_ = BotState::IN_POSITION; 
+        }
+        // If the Closing (Market) order failed
+        else if (waiting_for_close_) {
+             std::cout << "  ↳ Critical: Closing order failed. Retrying...\n";
+             // Stay in position, loop will retry close
+             current_state_ = BotState::IN_POSITION;
+             waiting_for_close_ = false;
+        }
+        // If the Entry order failed
+        else {
+            std::cout << "  ↳ Entry failed. Back to IDLE.\n";
+            current_state_ = BotState::IDLE;
+            position_filled_ = false;
+        }
     }
-    else if (status == "Rejected") {
-        std::cout << "❌ Order Rejected. Back to IDLE.\n";
-        current_state_ = BotState::IDLE;
-        waiting_for_close_ = false;
-        position_filled_ = false;
-    }
+
+    // 4. STOP TIMER (Measure actual processing time)
+    auto end_time = std::chrono::high_resolution_clock::now();
+
+    // 5. CALCULATE IN NANOSECONDS
+    auto duration = std::chrono::duration_cast<std::chrono::nanoseconds>(end_time - start_time).count();
+
+    std::cout << "⚡ Internal Logic Latency: " << duration << " nanoseconds\n";
 }
 
 // ============================================================================

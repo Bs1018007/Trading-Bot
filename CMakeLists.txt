@@ -222,3 +222,33 @@ message(STATUS "  libwebsockets     : ${LIBWEBSOCKETS_LIBRARIES}")
 message(STATUS "  CURL              : ${CURL_LIBRARIES}")
 message(STATUS "  OpenSSL           : ${OPENSSL_VERSION}")
 message(STATUS "========================================")
+
+# ============================================================================
+# UTILITY TOOLS
+# ============================================================================
+
+# 1. Aeron Spy (Data Receiver)
+#    This tool connects to the same Aeron channel to verify data flow.
+add_executable(aeron_spy src/utils/AeronSpy.cpp)
+
+target_include_directories(aeron_spy PRIVATE
+    ${AERON_CLIENT_INCLUDE_DIR}
+    ${AERON_DRIVER_INCLUDE_DIR}
+    ${AERON_C_INCLUDE_DIR}
+)
+
+target_link_libraries(aeron_spy PRIVATE
+    Threads::Threads
+    ${AERON_CPP_LIB}
+    ${AERON_DRIVER_LIB}
+    ${AERON_C_LIB}
+)
+
+# Ensure Mac finds the libraries at runtime
+if(APPLE)
+    set_target_properties(aeron_spy PROPERTIES
+        BUILD_RPATH "${AERON_LIB_DIR}"
+        INSTALL_RPATH "${AERON_LIB_DIR}"
+        BUILD_WITH_INSTALL_RPATH TRUE
+    )
+endif()

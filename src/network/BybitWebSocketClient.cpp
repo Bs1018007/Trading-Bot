@@ -167,7 +167,7 @@ void BybitWebSocketClient::authenticate() {
 }
 
 void BybitWebSocketClient::place_order(const std::string& symbol, const std::string& side, 
-                                      double qty, double price, const std::string& order_link_id) {
+                                      double qty, double price, const std::string& order_link_id,bool is_maker) {
     
     if (!connected_ || channel_type_ != ChannelType::PRIVATE_TRADE) {
         std::cerr << "❌ Place Order Failed: Not connected or wrong channel.\n";
@@ -176,6 +176,8 @@ void BybitWebSocketClient::place_order(const std::string& symbol, const std::str
 
     long long now = std::chrono::duration_cast<std::chrono::milliseconds>(
         std::chrono::system_clock::now().time_since_epoch()).count();
+
+    std::string tif = is_maker ? "PostOnly" : "GTC";
 
     std::stringstream ss;
     ss << std::fixed << std::setprecision(5);
@@ -189,11 +191,11 @@ void BybitWebSocketClient::place_order(const std::string& symbol, const std::str
        << "\"args\":[{"
        <<    "\"symbol\":\"" << symbol << "\","
        <<    "\"side\":\"" << side << "\","
-       <<    "\"orderType\":\"Market\","
+       <<    "\"orderType\":\"Limit\","
        <<    "\"qty\":\"" << qty << "\","
-       //<<    "\"price\":\"" << price << "\","
+       <<    "\"price\":\"" << price << "\","
        <<    "\"category\":\"linear\","
-       <<    "\"timeInForce\":\"IOC\","
+       <<    "\"timeInForce\":\"" << tif << "\","
        <<    "\"orderLinkId\":\"" << order_link_id << "\""
        << "}]}";
 
@@ -431,7 +433,7 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
         // Print to console if it's a topic update or an operation result
         if (raw_message.find("\"topic\"") != std::string::npos || raw_message.find("\"op\"") != std::string::npos) {
             // Truncate long messages for cleaner console output
-            std::cout << "🧪 Private Raw: " << raw_message.substr(0, 200) << (raw_message.length() > 200 ? "..." : "") << std::endl;
+            std::cout << "🧪 Private Raw: " << raw_message.substr(0, 500) << (raw_message.length() > 500 ? "..." : "") << std::endl;
         }
 
         simdjson::padded_string padded(data, len);

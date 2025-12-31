@@ -51,6 +51,8 @@ private:
     std::chrono::steady_clock::time_point position_entry_time_;
     std::chrono::steady_clock::time_point last_status_log_;
 
+    std::string active_exit_order_id_;
+
     // Order tracking
     std::string active_order_id_;
     double active_order_price_ = 0.0;
@@ -58,6 +60,7 @@ private:
     bool is_short_ = false;
     bool position_filled_ = false;
     bool waiting_for_close_ = false;
+
 
     // Risk parameters
     double base_quantity_;
@@ -80,6 +83,9 @@ private:
 
     // Constants
     static constexpr int ORDER_TIMEOUT_MS = 5000;
+    bool trigger_martingale_on_close_ = false;
+
+    bool is_averaging_ = false; // Track if we are adding to a position
 
     // Private methods
     bool validate_market_data();
@@ -92,8 +98,9 @@ private:
     void close_position_with_profit();
     void close_position_with_loss();
     void close_position_and_reset();
+    void execute_average_down(double current_market_price);
     
-    void place_order(double price, bool is_short);
+    void place_order(double price, bool is_short,bool is_maker);
     void handle_timeout();
     void reconcile_state_on_startup();
     

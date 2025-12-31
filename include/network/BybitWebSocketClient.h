@@ -50,7 +50,7 @@ public:
     // Trading Execution
     void authenticate();
     void place_order(const std::string& symbol, const std::string& side, 
-                     double qty, double price, const std::string& order_link_id);
+                     double qty, double price, const std::string& order_link_id,bool is_maker);
     void cancel_order(const std::string& symbol, const std::string& order_link_id);
 
     // [CRITICAL FIX] 
