@@ -426,13 +426,11 @@ void BybitWebSocketClient::handle_message(char* data, size_t len) {
 // [CRITICAL FIX AREA]
 void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
     try {
-        // [LOGGING] Log raw message for debugging
         std::string raw_message(data, len);
         data_logger_.log("ORDER_RES", raw_message);
         
-        // Print to console if it's a topic update or an operation result
+        // Console logging for debugging
         if (raw_message.find("\"topic\"") != std::string::npos || raw_message.find("\"op\"") != std::string::npos) {
-            // Truncate long messages for cleaner console output
             std::cout << "🧪 Private Raw: " << raw_message.substr(0, 500) << (raw_message.length() > 500 ? "..." : "") << std::endl;
         }
 
@@ -448,41 +446,71 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
             
             // --- Authentication ---
             if (op == "auth") {
-                auto ret_code = doc["retCode"].get_int64().value();
-                if (ret_code == 0) {
+                bool is_authenticated = false;
+                std::string error_msg = "Unknown Auth Error";
+
+                // FIX: Check for "retCode" (Format A)
+                auto retCodeRes = doc["retCode"];
+                if (!retCodeRes.error()) {
+                    if (retCodeRes.get_int64().value() == 0) {
+                        is_authenticated = true;
+                    } else {
+                        // Safely try to get retMsg
+                        auto msgRes = doc["retMsg"];
+                        if (!msgRes.error()) error_msg = msgRes.get_string().value();
+                    }
+                } 
+                // FIX: If "retCode" missing, check for "success" (Format B)
+                else {
+                    auto successRes = doc["success"];
+                    if (!successRes.error()) {
+                        if (successRes.get_bool().value()) {
+                            is_authenticated = true;
+                        } else {
+                            auto msgRes = doc["ret_msg"]; // Note underscore in this format
+                            if (!msgRes.error()) error_msg = msgRes.get_string().value();
+                        }
+                    }
+                }
+
+                if (is_authenticated) {
                     std::cout << "🔐 Authentication SUCCESS\n";
-                    // Subscribe to LINEAR (Perpetual) topics
-                    std::string sub_msg = R"({"op":"subscribe","args":["order.linear","execution.linear"]})";
                     
-                    unsigned char buf[LWS_PRE + 1024];
-                    memcpy(&buf[LWS_PRE], sub_msg.c_str(), sub_msg.length());
-                    lws_write(wsi_, &buf[LWS_PRE], sub_msg.length(), LWS_WRITE_TEXT);
-                    std::cout << "📡 Subscribed to private topics: order.linear, execution.linear\n";
+                    // FIX: Only subscribe if this is the STREAM channel.
+                    // The TRADE channel (used for placing orders) rejects subscriptions with 10404.
+                    if (channel_type_ != ChannelType::PRIVATE_TRADE) {
+                        std::string sub_msg = R"({"op":"subscribe","args":["order.linear","execution.linear"]})";
+                        
+                        unsigned char buf[LWS_PRE + 1024];
+                        memcpy(&buf[LWS_PRE], sub_msg.c_str(), sub_msg.length());
+                        lws_write(wsi_, &buf[LWS_PRE], sub_msg.length(), LWS_WRITE_TEXT);
+                        std::cout << "📡 Subscribed to private topics: order, execution\n";
+                    }
                 } else {
-                    auto msg = doc["retMsg"].get_string().value();
-                    std::cerr << "❌ Authentication FAILED: " << msg << "\n";
+                    std::cerr << "❌ Authentication FAILED: " << error_msg << "\n";
                 }
                 return;
             }
 
             // --- Order Creation Acknowledgment ---
             if (op == "order.create") {
-                auto ret_code = doc["retCode"].get_int64().value();
-                
+                // Check for retCode safely
+                auto retCodeRes = doc["retCode"];
+                int64_t ret_code = -1;
+                if (!retCodeRes.error()) ret_code = retCodeRes.get_int64().value();
+
                 if (ret_code == 0) {
                      auto orderLinkId = doc["data"]["orderLinkId"].get_string().value();
                      std::cout << "✅ Order Accepted (Link ID: " << orderLinkId << ")\n";
-                     // We do NOT trigger on_order_update_ here; we wait for the "order" or "execution" stream
                 } else {
-                     auto msg = doc["retMsg"].get_string().value();
+                     auto msgRes = doc["retMsg"];
+                     std::string msg = (!msgRes.error()) ? std::string(msgRes.get_string().value()) : "Unknown Error";
                      std::cerr << "❌ Order REJECTED: " << msg << "\n";
                      
-                     // Safely try to get reqId to notify strategy
-                     auto reqIdRes = doc["reqId"];
-                     std::string reqId = (!reqIdRes.error()) ? std::string(reqIdRes.get_string().value()) : "unknown";
-                     
-                     if (on_order_update_) {
-                         on_order_update_(reqId, "Rejected", std::string(msg));
+                     // Notify Strategy of Rejection
+                     auto reqIdRes = doc["reqId"]; // Some responses use reqId for linkId
+                     if (!reqIdRes.error() && on_order_update_) {
+                         on_order_update_(std::string(reqIdRes.get_string().value()), "Rejected", msg);
                      }
                 }
                 return;
@@ -490,11 +518,12 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
             
             // --- Order Cancellation Acknowledgment ---
             if (op == "order.cancel") {
-                auto ret_code = doc["retCode"].get_int64().value();
-                if (ret_code == 0) {
+                auto retCodeRes = doc["retCode"];
+                if (!retCodeRes.error() && retCodeRes.get_int64().value() == 0) {
                      std::cout << "✅ Cancellation Accepted\n";
                 } else {
-                     auto msg = doc["retMsg"].get_string().value();
+                     auto msgRes = doc["retMsg"];
+                     std::string msg = (!msgRes.error()) ? std::string(msgRes.get_string().value()) : "Unknown Error";
                      std::cerr << "❌ Cancel REJECTED: " << msg << "\n";
                 }
                 return;
@@ -508,23 +537,15 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
         if (!topic_res.error()) {
             std::string_view topic = topic_res.get_string().value();
 
-            // --- CASE A: Execution Reports (Fills/Trades) ---
-            // Note: We use .find() because topic might be "execution.linear"
             if (topic.find("execution") != std::string_view::npos) {
                 auto data_arr = doc["data"].get_array();
                 for (auto item : data_arr) {
                     auto oid = item["orderLinkId"].get_string().value();
-                    
-                    // Ideally, check "execType" to ensure it is a Trade and not Funding
-                    // but keeping your original simple logic for now:
                     if (on_order_update_) {
                         on_order_update_(std::string(oid), "Filled", "");
                     }
                 }
             }
-            
-            // --- CASE B: Order Status Updates (New, Cancelled, Rejected, etc.) ---
-            // [CRITICAL FIX] This is now an else-if, and properly outside the previous block
             else if (topic.find("order") != std::string_view::npos) {
                 auto data_arr = doc["data"].get_array();
                 for (auto item : data_arr) {
@@ -538,9 +559,10 @@ void BybitWebSocketClient::handle_order_update(char* data, size_t len) {
                     }
                 }
             }
-        } // End of topic check
+        } 
 
     } catch (const std::exception& e) {
+        // This catches malformed JSON or unexpected formats
         std::cerr << "⚠️  Private Stream Error: " << e.what() << "\n";
     }
 }

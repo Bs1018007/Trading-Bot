@@ -50,7 +50,7 @@ TradingEngine::TradingEngine(
     current_qty_ = base_quantity_;   // Current trade size (will double on loss)
     martingale_step_ = 0;            // Tracks consecutive losses
     max_martingale_steps_ = 100000;       // Stop doubling after 6 losses to prevent blow-up
-    profit_target_percent_ = 0.0005; // 0.05% gain target
+    profit_target_percent_ = 0.001; // 0.05% gain target
     stop_loss_percent_ = -0.0005;     // -0.05% loss limit
     cumulative_loss_ = 0.0;          // Total dollars lost in current sequence
     
@@ -203,7 +203,7 @@ bool TradingEngine::validate_market_data() {
     if (bid_qty <= 0 || ask_qty <= 0) return false;
 
     // 5. Check for Crossed Market (Bid >= Ask) - Data Error
-    if (bid >= ask - 0.01) {  
+    if (bid > ask ) {  
         static auto last_log = std::chrono::steady_clock::now();
         auto now = std::chrono::steady_clock::now();
         if (std::chrono::duration_cast<std::chrono::seconds>(now - last_log).count() > 5) {
@@ -237,11 +237,11 @@ void TradingEngine::evaluate_entry_signal() {
 
     if (!is_short_) {
         // Buying: Offer slightly above middle
-        price = mid_price + 0.1; 
+        price = mid_price - 0.1; 
         if (price >= best_ask) price = best_ask - 0.005; // Safety cap
     } else {
         // Selling: Offer slightly below middle
-        price = mid_price - 0.1;
+        price = mid_price + 0.1;
         if (price <= best_bid) price = best_bid + 0.005; // Safety cap
     }
     
@@ -319,6 +319,9 @@ void TradingEngine::monitor_working_order() {
 void TradingEngine::manage_open_position() {
     if (!position_filled_) return;
 
+    auto now = std::chrono::steady_clock::now();
+    auto elapsed = std::chrono::duration_cast<std::chrono::milliseconds>(now - state_entry_time_).count();
+    if (elapsed < 500) return; // Wait 1 second for market to settle
     // 1. Get Market Data
     auto ob = orderbook_manager_.get(symbol_);
     double best_bid, best_ask, dummy;
@@ -348,19 +351,13 @@ void TradingEngine::manage_open_position() {
             active_exit_order_id_ = ""; 
         }
 
-        // B. Decide: Hard Stop or Martingale Reverse?
-        if (martingale_step_ < max_martingale_steps_) {
-             std::cout << "  🔄 PREPARING REVERSAL: Closing now, will Double & Reverse on fill.\n";
+        
+        std::cout << "  🔄 PREPARING REVERSAL: Closing now, will Double & Reverse on fill.\n";
              
-             // Set a flag so on_order_update knows to reverse
-             trigger_martingale_on_close_ = true; 
+        // Set a flag so on_order_update knows to reverse
+        trigger_martingale_on_close_ = true; 
              
-             close_position(); // Send Market Exit
-        } else {
-             std::cout << "  🛑 Max Steps. Hard Stop.\n";
-             trigger_martingale_on_close_ = false;
-             close_position_and_reset();
-        }
+        close_position(); // Send Market Exit
     }
 }
 /*void TradingEngine::execute_average_down(double current_market_price) {
@@ -591,6 +588,8 @@ void TradingEngine::on_order_update(const std::string& order_id, const std::stri
         // CASE B: We just OPENED a position (Entry Filled)
         // Action: Post the Exit Order IMMEDIATELY
         else if (order_id == active_order_id_) {
+
+            if (position_filled_) return;
             std::cout << "✅ Entry Filled. Placing Exit Order IMMEDIATELY...\n";
             position_filled_ = true;
             current_state_ = BotState::IN_POSITION;
